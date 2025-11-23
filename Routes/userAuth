@@ -1,0 +1,172 @@
+const express = require("express");
+const router = express.Router();
+const User = require("../schema/userSchema");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
+const { authenticateUser } = require("../MiddleWare/auth")
+const cloudinary = require("cloudinary").v2;
+const multer = require("multer");
+const { CloudinaryStorage } = require("multer-storage-cloudinary");
+
+
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  param: "profile-upload",
+  upload_preset: process.env.CLOUDINARY_UPLOAD_PRESET,
+});
+const upload = multer({ storage: storage });
+
+router.get("/authenticate", authenticateUser, async (req, res) => {
+  res.json(req.user);
+})
+
+router.get("/alluser",async (req,res)=>{
+   const users=await User.find({});
+   res.status(200).json({users});
+})
+
+router.get("/getuser", authenticateUser, async (req, res) => {
+  res.json(req.user);
+});
+
+
+router.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password ) {
+      return res.status(400).send("All fields are required");
+    }
+    
+    const user = await User.findOne({ email: email });
+
+    if (!user) {
+      return res.status(400).send("Invalid email or password");
+    }
+
+    // Check if password is hashed (starts with $2b$ or $2a$ or $2y$) or plain text
+    let isPasswordValid = false;
+    
+    if (user.password.startsWith('$2')) {
+      // Password is hashed, use bcrypt compare
+      isPasswordValid = await bcrypt.compare(password, user.password);
+    } else {
+      // Password is plain text (for backward compatibility with old users)
+      isPasswordValid = password === user.password;
+      
+      // If login successful with plain text, hash it for future use
+      if (isPasswordValid) {
+        const saltRounds = 10;
+        user.password = await bcrypt.hash(password, saltRounds);
+        await user.save();
+      }
+    }
+    
+    if (isPasswordValid) {
+      const payload = { id: user._id, email: user.email };
+      const token = jwt.sign(payload, "Userdata", { expiresIn: "1h" });
+      res.status(200).json({ user, token });
+      console.log("USER LOGGED IN SUCCESSFULLY", user.email);
+    } else {
+      res.status(400).send("Invalid email or password");
+    }
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).send("Server error: " + error.message);
+  }
+});
+
+router.post("/signup",upload.single("profileImageUrl"), async (req, res) => {
+  try {
+    const { name, email, age, gender, password } = req.body;
+
+    if (!name || !email || !age || !gender || !password) {
+      return res.status(400).send("All fields are required");
+    }
+   
+    const userFind = await User.findOne({ email: email });
+
+    if (userFind) {
+      console.log(" ALREADY EXISTS", userFind);
+      return res.status(400).send("User already exists");
+    }
+
+    // Hash password with bcrypt
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    const user = new User({
+      name,
+      email,
+      age,
+      gender,
+      password: hashedPassword, // Save hashed password
+      profileImageUrl: req.file ? req.file.path : ""
+    });
+    
+    await user.save();
+    console.log("USER ADDED SUCCESSFULLY", user.email);
+    res.status(200).send(user);
+  } catch (error) {
+    console.error("Signup error:", error);
+    res.status(500).send("Server error: " + error.message);
+  }
+});
+
+router.put("/update", authenticateUser,upload.single("profileImage"), async (req, res) => {
+  try {
+    const { name, age, password } = req.body;
+    const user = req.user; // it is taken from middleware authenticateUser
+    if (!user) {
+      return res.status(404).send("User not found");
+    }
+    
+    // Update fields only if provided
+    if (name) user.name = name;
+    if (age) user.age = age;
+    
+    // Hash password if provided
+    if (password) {
+      const saltRounds = 10;
+      user.password = await bcrypt.hash(password, saltRounds);
+    }
+    
+    // Update image only if a new file is uploaded
+    if (req.file && req.file.path) {
+      user.profileImageUrl = req.file.path;
+    }
+    
+    await user.save();
+    res.status(200).send(user);
+  } catch (error) {
+    console.error("Update error:", error);
+    res.status(500).send("Server error: " + error.message);
+  }
+});
+
+router.put("/change-password", authenticateUser, async (req, res) => {
+  try {
+    const { email, newPassword } = req.body;
+    const user = req.user; // it is taken from middleware authenticateUser
+    if (!user) {
+      return res.status(404).send("User not found");
+    }
+    
+    if (!newPassword) {
+      return res.status(400).send("New password is required");
+    }
+    
+    // Hash the new password
+    const saltRounds = 10;
+    user.password = await bcrypt.hash(newPassword, saltRounds);
+    await user.save();
+    res.status(200).send(user);
+  } catch (error) {
+    console.error("Update error:", error);
+    res.status(500).send("Server error: " + error.message);
+  }
+});
+
+module.exports = {
+  router,
+  authenticateUser
+};
