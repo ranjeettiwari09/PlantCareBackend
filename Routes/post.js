@@ -12,10 +12,16 @@ const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
     folder: "news-upload",
-    upload_preset: process.env.CLOUDINARY_UPLOAD_PRESET,
+    // Removed upload_preset to avoid conflict
+    // upload_preset: process.env.CLOUDINARY_UPLOAD_PRESET,
   },
 });
-const upload = multer({ storage: storage });
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  }
+});
 
 
 // ✅ Get all posts
@@ -46,66 +52,126 @@ routerPost.get("/:id", async (req, res) => {
 routerPost.post(
   "/addPost",
   authenticateUser,
-  upload.single("image"),
+  (req, res, next) => {
+    upload.single("image")(req, res, (err) => {
+      if (err) {
+        console.error("Multer upload error:", err);
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ message: "File too large. Maximum size is 10MB." });
+        }
+        return res.status(400).json({ message: "Image upload error: " + err.message });
+      }
+      next();
+    });
+  },
   async (req, res) => {
     try {
-      const { caption, date, likeCount, comment ,email} = req.body;
+      const { caption, date, likeCount, comment } = req.body;
       const image = req.file;
+      const email = req.user.email; // Get email from authenticated user
 
-      if (!caption || !image) {
-        return res.status(400).json({ message: "Caption and image are required" });
+      console.log("Post creation request:", {
+        caption: caption?.substring(0, 50),
+        hasImage: !!image,
+        email
+      });
+
+      if (!caption || !caption.trim()) {
+        return res.status(400).json({ message: "Caption is required" });
+      }
+
+      if (!image) {
+        return res.status(400).json({ message: "Image is required" });
+      }
+
+      // Get image URL from Cloudinary response (handle different formats)
+      const imageUrl = image.path || image.secure_url || image.url;
+      if (!imageUrl) {
+        console.error("Image upload failed - no URL returned:", image);
+        return res.status(400).json({ message: "Image upload failed. Please try again." });
+      }
+
+      // Parse date safely
+      let postDate;
+      if (date) {
+        postDate = new Date(date);
+        if (isNaN(postDate.getTime())) {
+          postDate = new Date(); // Use current date if invalid
+        }
+      } else {
+        postDate = new Date(); // Use current date if not provided
+      }
+
+      // Parse comment safely
+      let commentArray = [];
+      if (comment) {
+        try {
+          if (typeof comment === 'string') {
+            commentArray = JSON.parse(comment);
+          } else if (Array.isArray(comment)) {
+            commentArray = comment;
+          }
+        } catch (parseError) {
+          console.error("Error parsing comment:", parseError);
+          commentArray = [];
+        }
       }
 
       const newPost = new post({
         email,
-        caption,
-        image: image.path, // Cloudinary URL
-        date: new Date(date),
-        likeCount: likeCount || 0,
-        comment: comment ? JSON.parse(comment) : [],
+        caption: caption.trim(),
+        image: imageUrl,
+        date: postDate,
+        likeCount: likeCount ? parseInt(likeCount) : 0,
+        comment: commentArray,
+        likedBy: []
       });
 
       await newPost.save();
-      
+      console.log("Post created successfully:", newPost._id);
+
       // Create notifications for all users (except the post creator)
       // In a real app, you might only notify followers
       try {
         const postCreator = await User.findOne({ email: email });
         const creatorName = postCreator?.name || email;
-        
+
         const allUsers = await User.find({ email: { $ne: email } });
-        
-        // Create notifications for all other users
-        const notifications = allUsers.map(user => ({
-          userId: user.email,
-          type: "post",
-          title: "New Post",
-          message: `${creatorName} shared a new post: ${caption.substring(0, 50)}${caption.length > 50 ? '...' : ''}`,
-          relatedId: newPost._id.toString(),
-          relatedEmail: email
-        }));
-        
-        const savedNotifications = await Notification.insertMany(notifications);
-        
-        // Emit notifications via socket.io
-        try {
-          const { io } = require("../index");
-          if (io) {
-            savedNotifications.forEach(notif => {
-              io.to(notif.userId).emit("notification:new", notif);
-            });
+
+        // Only create notifications if there are other users
+        if (allUsers && allUsers.length > 0) {
+          // Create notifications for all other users
+          const notifications = allUsers.map(user => ({
+            userId: user.email,
+            type: "post",
+            title: "New Post",
+            message: `${creatorName} shared a new post: ${caption.substring(0, 50)}${caption.length > 50 ? '...' : ''}`,
+            relatedId: newPost._id.toString(),
+            relatedEmail: email
+          }));
+
+          const savedNotifications = await Notification.insertMany(notifications);
+
+          // Emit notifications via socket.io
+          try {
+            const { io } = require("../index");
+            if (io) {
+              savedNotifications.forEach(notif => {
+                io.to(notif.userId).emit("notification:new", notif);
+              });
+            }
+          } catch (err) {
+            console.error("Error emitting post notifications:", err);
           }
-        } catch (err) {
-          console.error("Error emitting post notifications:", err);
         }
       } catch (notifError) {
         console.error("Error creating post notifications:", notifError);
         // Don't fail the post creation if notifications fail
       }
-      
+
       res.status(201).json({ message: "Post added successfully", post: newPost });
     } catch (error) {
-      console.log(error);
+      console.error("Error adding post:", error);
       res.status(500).json({ message: "Server error: " + error.message });
     }
   }
@@ -142,7 +208,7 @@ routerPost.put("/like/:postID", authenticateUser, async (req, res) => {
 
     // Check if user already liked this post
     const userIndex = foundPost.likedBy.indexOf(userEmail);
-    
+
     if (userIndex !== -1) {
       // User already liked - remove like (unlike)
       foundPost.likedBy.splice(userIndex, 1);

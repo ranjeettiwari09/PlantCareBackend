@@ -1,11 +1,12 @@
+require("dotenv").config();
 const nodemailer = require("nodemailer");
-const express=require("express")
-const mailerRouter=express.Router()
+const express = require("express")
+const mailerRouter = express.Router()
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: "tiwariji20022002@gmail.com",
-    pass: "vcve igcf hzor seef",   
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
 });
 
@@ -13,7 +14,7 @@ mailerRouter.post("/send-otp", async (req, res) => {
   const { email, message } = req.body;
 
   const mailOptions = {
-    from: "tiwariji20022002@gmail.com",
+    from: process.env.EMAIL_USER,
     to: email,
     subject: "Verification Code",
     text: message,
@@ -27,5 +28,5 @@ mailerRouter.post("/send-otp", async (req, res) => {
     res.status(500).json({ error: "Failed to send email" });
   }
 });
-module.exports=mailerRouter
+module.exports = mailerRouter
 
